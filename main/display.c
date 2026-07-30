@@ -21,6 +21,7 @@
 static const char *TAG = "display";
 
 static lv_obj_t *s_spectrum;
+static lv_obj_t *s_tone_marker;
 static lv_obj_t *s_text;
 static lv_obj_t *s_status;
 static lv_obj_t *s_menu;
@@ -29,6 +30,9 @@ static int s_has_pending_mode;
 static int s_pending_tone_hz;
 static int s_has_pending_tone;
 static esp_lcd_touch_handle_t s_touch;
+
+#define WATERFALL_HEIGHT 120
+
 static bool notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io,
                                     esp_lcd_panel_io_event_data_t *edata,
                                     void *user_ctx)
@@ -143,6 +147,61 @@ static void spectrum_touch_cb(lv_event_t *event)
     (void)event;
 }
 
+static lv_color_t waterfall_color(uint8_t power)
+{
+    if (power < 12) {
+        return lv_color_hex(0x000000);
+    }
+    if (power < 96) {
+        const uint8_t b = 48 + (power * 160) / 96;
+        return lv_color_make(0, 0, b);
+    }
+    if (power < 170) {
+        const uint8_t t = (uint8_t)(((power - 96) * 255) / 74);
+        return lv_color_make(t / 4, t / 4, 210);
+    }
+    if (power < 230) {
+        const uint8_t t = (uint8_t)(((power - 170) * 255) / 60);
+        return lv_color_make(40 + t, 40 + t, 210 - (t * 170) / 255);
+    }
+    return lv_color_make(255, 245, 160);
+}
+
+static uint8_t waterfall_power_at_x(const spectrum_t *spectrum, int x)
+{
+    const int scaled = x * (SPECTRUM_BINS - 1) * 256 / (BOARD_LCD_WIDTH - 1);
+    const int bin = scaled / 256;
+    const int frac = scaled % 256;
+    const int next = bin + 1 < SPECTRUM_BINS ? bin + 1 : bin;
+    const int a = spectrum->bins[bin];
+    const int b = spectrum->bins[next];
+    return (uint8_t)((a * (256 - frac) + b * frac) / 256);
+}
+
+static void waterfall_render_row(lv_color_t *buf, const spectrum_t *spectrum)
+{
+    memmove(buf + BOARD_LCD_WIDTH, buf,
+            BOARD_LCD_WIDTH * (WATERFALL_HEIGHT - 1) * sizeof(buf[0]));
+
+    for (int x = 0; x < BOARD_LCD_WIDTH; ++x) {
+        buf[x] = waterfall_color(waterfall_power_at_x(spectrum, x));
+    }
+}
+
+static void update_tone_marker(int rx_tone_hz)
+{
+    int marker_x = ((rx_tone_hz - 100) * BOARD_LCD_WIDTH) / 3400;
+    if (marker_x < 0) {
+        marker_x = 0;
+    } else if (marker_x >= BOARD_LCD_WIDTH) {
+        marker_x = BOARD_LCD_WIDTH - 1;
+    }
+
+    if (s_tone_marker) {
+        lv_obj_set_pos(s_tone_marker, s_spectrum->coords.x1 + marker_x, s_spectrum->coords.y1);
+    }
+}
+
 static void create_ui(lv_disp_t *disp)
 {
     lv_obj_t *screen = lv_disp_get_scr_act(disp);
@@ -153,10 +212,18 @@ static void create_ui(lv_disp_t *disp)
     lv_obj_align(s_status, LV_ALIGN_TOP_LEFT, 6, 4);
 
     s_spectrum = lv_canvas_create(screen);
-    lv_obj_set_size(s_spectrum, BOARD_LCD_WIDTH, BOARD_LCD_HEIGHT / 2 - 20);
+    lv_obj_set_size(s_spectrum, BOARD_LCD_WIDTH, WATERFALL_HEIGHT);
     lv_obj_align(s_spectrum, LV_ALIGN_TOP_MID, 0, 22);
     lv_obj_add_flag(s_spectrum, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(s_spectrum, spectrum_touch_cb, LV_EVENT_CLICKED, NULL);
+
+    s_tone_marker = lv_obj_create(screen);
+    lv_obj_set_size(s_tone_marker, 2, WATERFALL_HEIGHT);
+    lv_obj_set_style_bg_color(s_tone_marker, lv_color_hex(0xff1b1b), 0);
+    lv_obj_set_style_bg_opa(s_tone_marker, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_tone_marker, 0, 0);
+    lv_obj_set_style_radius(s_tone_marker, 0, 0);
+    lv_obj_clear_flag(s_tone_marker, LV_OBJ_FLAG_CLICKABLE);
 
     s_text = lv_label_create(screen);
     lv_obj_set_width(s_text, BOARD_LCD_WIDTH - 12);
@@ -311,10 +378,11 @@ void display_append_text(display_state_t *state, const char *text)
 
 void display_render(const display_state_t *state, const spectrum_t *spectrum)
 {
-    static uint8_t canvas_buf[LV_CANVAS_BUF_SIZE_TRUE_COLOR(BOARD_LCD_WIDTH, 120)];
+    static lv_color_t canvas_buf[BOARD_LCD_WIDTH * WATERFALL_HEIGHT];
     static int canvas_ready;
     if (!canvas_ready) {
-        lv_canvas_set_buffer(s_spectrum, canvas_buf, BOARD_LCD_WIDTH, 120, LV_IMG_CF_TRUE_COLOR);
+        lv_canvas_set_buffer(s_spectrum, canvas_buf, BOARD_LCD_WIDTH, WATERFALL_HEIGHT, LV_IMG_CF_TRUE_COLOR);
+        lv_canvas_fill_bg(s_spectrum, lv_color_hex(0x000000), LV_OPA_COVER);
         canvas_ready = 1;
     }
 
@@ -323,16 +391,9 @@ void display_render(const display_state_t *state, const spectrum_t *spectrum)
         return;
     }
 
-    lv_canvas_fill_bg(s_spectrum, lv_color_hex(0x101418), LV_OPA_COVER);
-    lv_draw_rect_dsc_t bar;
-    lv_draw_rect_dsc_init(&bar);
-    bar.bg_color = lv_color_hex(0x2bd4bd);
-    bar.bg_opa = LV_OPA_COVER;
-    const int bar_w = BOARD_LCD_WIDTH / SPECTRUM_BINS;
-    for (int i = 0; i < SPECTRUM_BINS; ++i) {
-        const int h = 4 + (spectrum->bins[i] * 110) / 255;
-        lv_canvas_draw_rect(s_spectrum, i * bar_w, 120 - h, bar_w > 1 ? bar_w - 1 : 1, h, &bar);
-    }
+    waterfall_render_row(canvas_buf, spectrum);
+    lv_obj_invalidate(s_spectrum);
+    update_tone_marker(state->rx_tone_hz);
 
     char status[64];
     snprintf(status, sizeof(status), "%s  RX %d Hz  Peak %d Hz",

@@ -3,57 +3,97 @@
 #include <string.h>
 
 #include "board_config.h"
-#include "esp_adc/adc_continuous.h"
+#include "driver/i2s_std.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "es8311.h"
 
 static const char *TAG = "audio";
-static adc_continuous_handle_t s_adc;
+static i2s_chan_handle_t s_rx_handle;
+static es8311_handle_t s_codec;
+
+static esp_err_t codec_i2c_init(void)
+{
+    s_codec = es8311_create(BOARD_AUDIO_I2C_PORT, ES8311_ADDRRES_0);
+    ESP_RETURN_ON_FALSE(s_codec, ESP_FAIL, TAG, "es8311 create failed");
+
+    const es8311_clock_config_t es_clk = {
+        .mclk_inverted = false,
+        .sclk_inverted = false,
+        .mclk_from_mclk_pin = true,
+        .mclk_frequency = BOARD_SAMPLE_RATE_HZ * BOARD_AUDIO_MCLK_MULTIPLE,
+        .sample_frequency = BOARD_SAMPLE_RATE_HZ,
+    };
+
+    ESP_RETURN_ON_ERROR(es8311_init(s_codec, &es_clk, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16), TAG, "es8311 init");
+    ESP_RETURN_ON_ERROR(es8311_sample_frequency_config(s_codec, BOARD_SAMPLE_RATE_HZ * BOARD_AUDIO_MCLK_MULTIPLE, BOARD_SAMPLE_RATE_HZ),
+                        TAG, "es8311 sample rate");
+    ESP_RETURN_ON_ERROR(es8311_microphone_config(s_codec, false), TAG, "es8311 mic config");
+    ESP_RETURN_ON_ERROR(es8311_microphone_gain_set(s_codec, ES8311_MIC_GAIN_6DB), TAG, "es8311 mic gain");
+    return ESP_OK;
+}
+
+static esp_err_t i2s_driver_init(void)
+{
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(BOARD_AUDIO_I2S_NUM, I2S_ROLE_MASTER);
+    chan_cfg.auto_clear = true;
+    ESP_RETURN_ON_ERROR(i2s_new_channel(&chan_cfg, NULL, &s_rx_handle), TAG, "i2s channel");
+
+    i2s_std_config_t std_cfg = {
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(BOARD_SAMPLE_RATE_HZ),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
+        .gpio_cfg = {
+            .mclk = BOARD_AUDIO_I2S_MCLK,
+            .bclk = BOARD_AUDIO_I2S_BCLK,
+            .ws = BOARD_AUDIO_I2S_WS,
+            .dout = BOARD_AUDIO_I2S_DOUT,
+            .din = BOARD_AUDIO_I2S_DIN,
+            .invert_flags = {
+                .mclk_inv = false,
+                .bclk_inv = false,
+                .ws_inv = false,
+            },
+        },
+    };
+    std_cfg.clk_cfg.mclk_multiple = BOARD_AUDIO_MCLK_MULTIPLE;
+
+    ESP_RETURN_ON_ERROR(i2s_channel_init_std_mode(s_rx_handle, &std_cfg), TAG, "i2s init");
+    ESP_RETURN_ON_ERROR(i2s_channel_enable(s_rx_handle), TAG, "i2s enable");
+    return ESP_OK;
+}
 
 esp_err_t audio_input_init(void)
 {
-    adc_continuous_handle_cfg_t handle_cfg = {
-        .max_store_buf_size = 4096,
-        .conv_frame_size = 512,
-    };
-    ESP_RETURN_ON_ERROR(adc_continuous_new_handle(&handle_cfg, &s_adc), TAG, "adc handle");
-
-    adc_continuous_config_t dig_cfg = {
-        .sample_freq_hz = BOARD_SAMPLE_RATE_HZ,
-        .conv_mode = ADC_CONV_SINGLE_UNIT_1,
-        .format = ADC_DIGI_OUTPUT_FORMAT_TYPE2,
-    };
-
-    adc_digi_pattern_config_t pattern = {
-        .atten = BOARD_AUDIO_ADC_ATTEN,
-        .channel = BOARD_AUDIO_ADC_CHANNEL,
-        .unit = BOARD_AUDIO_ADC_UNIT,
-        .bit_width = SOC_ADC_DIGI_MAX_BITWIDTH,
-    };
-    dig_cfg.pattern_num = 1;
-    dig_cfg.adc_pattern = &pattern;
-
-    ESP_RETURN_ON_ERROR(adc_continuous_config(s_adc, &dig_cfg), TAG, "adc config");
-    ESP_RETURN_ON_ERROR(adc_continuous_start(s_adc), TAG, "adc start");
+    ESP_RETURN_ON_ERROR(i2s_driver_init(), TAG, "i2s driver init");
+    ESP_RETURN_ON_ERROR(codec_i2c_init(), TAG, "codec init");
+    ESP_LOGI(TAG, "ES8311/I2S audio backend ready");
     return ESP_OK;
 }
 
 size_t audio_input_read(int16_t *samples, size_t max_samples, uint32_t timeout_ms)
 {
-    uint8_t raw[512];
-    uint32_t got = 0;
-    const esp_err_t err = adc_continuous_read(s_adc, raw, sizeof(raw), &got, timeout_ms);
-    if (err != ESP_OK || got == 0) {
+    if (!samples || max_samples == 0) {
         return 0;
     }
 
-    size_t out = 0;
-    for (uint32_t offset = 0; offset + sizeof(adc_digi_output_data_t) <= got && out < max_samples;
-         offset += sizeof(adc_digi_output_data_t)) {
-        adc_digi_output_data_t data;
-        memcpy(&data, raw + offset, sizeof(data));
-        const int raw_sample = data.type2.data;
-        samples[out++] = (int16_t)((raw_sample - 2048) << 4);
+    if (max_samples > 256) {
+        max_samples = 256;
     }
-    return out;
+
+    int16_t raw[512];
+    size_t bytes_read = 0;
+    const size_t bytes_requested = max_samples * sizeof(raw[0]) * 2;
+    const esp_err_t err = i2s_channel_read(s_rx_handle, raw, bytes_requested, &bytes_read, timeout_ms);
+    if (err != ESP_OK || bytes_read < sizeof(int16_t) * 2) {
+        return 0;
+    }
+
+    const size_t frames = bytes_read / (sizeof(int16_t) * 2);
+    const size_t out_count = frames < max_samples ? frames : max_samples;
+    for (size_t i = 0; i < out_count; ++i) {
+        const int32_t left = raw[i * 2];
+        const int32_t right = raw[i * 2 + 1];
+        samples[i] = (int16_t)((left + right) / 2);
+    }
+    return out_count;
 }

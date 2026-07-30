@@ -13,7 +13,6 @@
 #include "esp_log.h"
 #include "esp_check.h"
 #include "driver/gpio.h"
-#include "driver/i2c.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_touch.h"
 
@@ -313,22 +312,18 @@ static esp_err_t touch_ft5x06_reset(esp_lcd_touch_handle_t tp)
 static esp_err_t touch_ft5x06_i2c_write(esp_lcd_touch_handle_t tp, uint8_t reg, uint8_t data)
 {
     assert(tp != NULL);
+    assert(tp->io != NULL);
 
-    // *INDENT-OFF*
-    /* Write data */
-    // return esp_lcd_panel_io_tx_param(tp->io, reg, (uint8_t[]){data}, 1);
-    // *INDENT-ON*
     uint8_t write_buf[2] = {reg, data};
 
-    return i2c_master_write_to_device(0, 0x38, write_buf, sizeof(write_buf), 1000 / portTICK_PERIOD_MS);
+    return esp_lcd_panel_io_tx_param(tp->io, write_buf[0], &write_buf[1], 1);
 }
 
 static esp_err_t touch_ft5x06_i2c_read(esp_lcd_touch_handle_t tp, uint8_t reg, uint8_t *data, uint8_t len)
 {
     assert(tp != NULL);
     assert(data != NULL);
+    assert(tp->io != NULL);
 
-    /* Read data */
-    // return esp_lcd_panel_io_rx_param(tp->io, reg, data, len);
-    return i2c_master_write_read_device(0, 0x38, &reg, 1, data, len, 1000 / portTICK_PERIOD_MS);
+    return esp_lcd_panel_io_rx_param(tp->io, reg, data, len);
 }

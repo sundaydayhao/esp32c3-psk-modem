@@ -21,7 +21,7 @@ void app_main(void)
 
     modem_t modem;
     modem_config_t modem_config = {
-        .mode = MODEM_MODE_BPSK31,
+        .mode = MODEM_MODE_PSK63,
         .sample_rate_hz = BOARD_SAMPLE_RATE_HZ,
         .rx_tone_hz = 1000,
         .squelch = 20,

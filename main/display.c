@@ -5,9 +5,10 @@
 
 #include "board_config.h"
 #include "driver/gpio.h"
-#include "driver/i2c_master.h"
+#include "driver/i2c.h"
 #include "driver/spi_master.h"
 #include "esp_heap_caps.h"
+#include "esp_check.h"
 #include "esp_lcd_io_i2c.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
@@ -28,8 +29,6 @@ static int s_has_pending_mode;
 static int s_pending_tone_hz;
 static int s_has_pending_tone;
 static esp_lcd_touch_handle_t s_touch;
-static i2c_master_bus_handle_t s_i2c_bus;
-
 static bool notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io,
                                     esp_lcd_panel_io_event_data_t *edata,
                                     void *user_ctx)
@@ -39,6 +38,45 @@ static bool notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io,
     (void)panel_io;
     (void)edata;
     return false;
+}
+
+static void update_lcd_and_touch_rotation(lv_disp_drv_t *drv)
+{
+    esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t)drv->user_data;
+    bool swap_xy = false;
+    bool mirror_x = false;
+    bool mirror_y = false;
+
+    switch (drv->rotated) {
+    case LV_DISP_ROT_NONE:
+        break;
+    case LV_DISP_ROT_90:
+        swap_xy = true;
+        mirror_y = true;
+        break;
+    case LV_DISP_ROT_180:
+        mirror_x = true;
+        mirror_y = true;
+        break;
+    case LV_DISP_ROT_270:
+        swap_xy = true;
+        mirror_x = true;
+        break;
+    }
+
+    esp_lcd_panel_swap_xy(panel_handle, swap_xy);
+    esp_lcd_panel_mirror(panel_handle, mirror_x, mirror_y);
+
+    if (s_touch) {
+        esp_lcd_touch_set_swap_xy(s_touch, swap_xy);
+        esp_lcd_touch_set_mirror_x(s_touch, mirror_x);
+        esp_lcd_touch_set_mirror_y(s_touch, mirror_y);
+    }
+}
+
+static void lvgl_port_update_cb(lv_disp_drv_t *drv)
+{
+    update_lcd_and_touch_rotation(drv);
 }
 
 static void lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map)
@@ -70,15 +108,16 @@ static void increase_lvgl_tick(void *arg)
 
 static esp_err_t i2c_master_init(void)
 {
-    i2c_master_bus_config_t conf = {
-        .i2c_port = BOARD_TOUCH_I2C_PORT,
+    i2c_config_t conf = {
+        .mode = I2C_MODE_MASTER,
         .sda_io_num = BOARD_TOUCH_PIN_SDA,
         .scl_io_num = BOARD_TOUCH_PIN_SCL,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master.clk_speed = 400000,
     };
-    return i2c_new_master_bus(&conf, &s_i2c_bus);
+    ESP_RETURN_ON_ERROR(i2c_param_config(BOARD_TOUCH_I2C_PORT, &conf), TAG, "i2c param config");
+    return i2c_driver_install(BOARD_TOUCH_I2C_PORT, I2C_MODE_MASTER, 0, 0, 0);
 }
 
 static void mode_button_cb(lv_event_t *event)
@@ -190,12 +229,14 @@ esp_err_t display_init(void)
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_handle, true));
     ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_handle, false, false));
+    ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_handle, false));
+    ESP_ERROR_CHECK(esp_lcd_panel_set_gap(panel_handle, 0, 0));
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
     gpio_set_level(BOARD_LCD_PIN_BL, BOARD_LCD_BL_ON_LEVEL);
 
     esp_lcd_panel_io_handle_t tp_io_handle = NULL;
     esp_lcd_panel_io_i2c_config_t tp_io_config = ESP_LCD_TOUCH_IO_I2C_FT5x06_CONFIG();
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(s_i2c_bus, &tp_io_config, &tp_io_handle));
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c((esp_lcd_i2c_bus_handle_t)BOARD_TOUCH_I2C_PORT, &tp_io_config, &tp_io_handle));
     esp_lcd_touch_config_t tp_cfg = {
         .x_max = BOARD_LCD_WIDTH,
         .y_max = BOARD_LCD_HEIGHT,
@@ -220,9 +261,11 @@ esp_err_t display_init(void)
     disp_drv.hor_res = BOARD_LCD_WIDTH;
     disp_drv.ver_res = BOARD_LCD_HEIGHT;
     disp_drv.flush_cb = lvgl_flush_cb;
+    disp_drv.drv_update_cb = lvgl_port_update_cb;
     disp_drv.draw_buf = &disp_buf;
     disp_drv.user_data = panel_handle;
     lv_disp_t *disp = lv_disp_drv_register(&disp_drv);
+    update_lcd_and_touch_rotation(&disp_drv);
 
     static lv_indev_drv_t indev_drv;
     lv_indev_drv_init(&indev_drv);

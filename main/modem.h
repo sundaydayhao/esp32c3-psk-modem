@@ -33,10 +33,7 @@ size_t modem_process(modem_t *m, const int16_t *samples, size_t count, char *out
 
 struct modem {
     modem_config_t config;
-    float phase;
-    float bit_clock;
     uint32_t sample_counter;
-    uint32_t demo_counter;
     nuepsk_rx_t nue_rx;
     char *out;
     size_t out_size;

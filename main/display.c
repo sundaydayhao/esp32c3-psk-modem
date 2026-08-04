@@ -3,9 +3,9 @@
 #include <assert.h>
 #include <string.h>
 
+#include "board_i2c.h"
 #include "board_config.h"
 #include "driver/gpio.h"
-#include "driver/i2c.h"
 #include "driver/spi_master.h"
 #include "esp_heap_caps.h"
 #include "esp_check.h"
@@ -32,6 +32,7 @@ static int s_has_pending_tone;
 static esp_lcd_touch_handle_t s_touch;
 
 #define WATERFALL_HEIGHT 120
+#define WATERFALL_ROWS_PER_FRAME 4
 
 static bool notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io,
                                     esp_lcd_panel_io_event_data_t *edata,
@@ -110,20 +111,6 @@ static void increase_lvgl_tick(void *arg)
     (void)arg;
 }
 
-static esp_err_t i2c_master_init(void)
-{
-    i2c_config_t conf = {
-        .mode = I2C_MODE_MASTER,
-        .sda_io_num = BOARD_TOUCH_PIN_SDA,
-        .scl_io_num = BOARD_TOUCH_PIN_SCL,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master.clk_speed = 400000,
-    };
-    ESP_RETURN_ON_ERROR(i2c_param_config(BOARD_TOUCH_I2C_PORT, &conf), TAG, "i2c param config");
-    return i2c_driver_install(BOARD_TOUCH_I2C_PORT, I2C_MODE_MASTER, 0, 0, 0);
-}
-
 static void mode_button_cb(lv_event_t *event)
 {
     s_pending_mode = (modem_mode_t)(uintptr_t)lv_event_get_user_data(event);
@@ -180,11 +167,14 @@ static uint8_t waterfall_power_at_x(const spectrum_t *spectrum, int x)
 
 static void waterfall_render_row(lv_color_t *buf, const spectrum_t *spectrum)
 {
-    memmove(buf + BOARD_LCD_WIDTH, buf,
-            BOARD_LCD_WIDTH * (WATERFALL_HEIGHT - 1) * sizeof(buf[0]));
+    memmove(buf + BOARD_LCD_WIDTH * WATERFALL_ROWS_PER_FRAME, buf,
+            BOARD_LCD_WIDTH * (WATERFALL_HEIGHT - WATERFALL_ROWS_PER_FRAME) * sizeof(buf[0]));
 
-    for (int x = 0; x < BOARD_LCD_WIDTH; ++x) {
-        buf[x] = waterfall_color(waterfall_power_at_x(spectrum, x));
+    for (int row = 0; row < WATERFALL_ROWS_PER_FRAME; ++row) {
+        lv_color_t *line = buf + row * BOARD_LCD_WIDTH;
+        for (int x = 0; x < BOARD_LCD_WIDTH; ++x) {
+            line[x] = waterfall_color(waterfall_power_at_x(spectrum, x));
+        }
     }
 }
 
@@ -252,7 +242,8 @@ static void create_ui(lv_disp_t *disp)
 
 esp_err_t display_init(void)
 {
-    ESP_ERROR_CHECK(i2c_master_init());
+    i2c_master_bus_handle_t touch_i2c_bus = NULL;
+    ESP_ERROR_CHECK(board_i2c_get_bus(&touch_i2c_bus));
 
     gpio_config_t bk_gpio_config = {
         .mode = GPIO_MODE_OUTPUT,
@@ -303,7 +294,9 @@ esp_err_t display_init(void)
 
     esp_lcd_panel_io_handle_t tp_io_handle = NULL;
     esp_lcd_panel_io_i2c_config_t tp_io_config = ESP_LCD_TOUCH_IO_I2C_FT5x06_CONFIG();
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c((esp_lcd_i2c_bus_handle_t)BOARD_TOUCH_I2C_PORT, &tp_io_config, &tp_io_handle));
+    tp_io_config.scl_speed_hz = BOARD_I2C_SPEED_HZ;
+    tp_io_config.lcd_param_bits = 8;
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(touch_i2c_bus, &tp_io_config, &tp_io_handle));
     esp_lcd_touch_config_t tp_cfg = {
         .x_max = BOARD_LCD_WIDTH,
         .y_max = BOARD_LCD_HEIGHT,
@@ -384,11 +377,6 @@ void display_render(const display_state_t *state, const spectrum_t *spectrum)
         lv_canvas_set_buffer(s_spectrum, canvas_buf, BOARD_LCD_WIDTH, WATERFALL_HEIGHT, LV_IMG_CF_TRUE_COLOR);
         lv_canvas_fill_bg(s_spectrum, lv_color_hex(0x000000), LV_OPA_COVER);
         canvas_ready = 1;
-    }
-
-    static int frame_div;
-    if (++frame_div % 5 != 0) {
-        return;
     }
 
     waterfall_render_row(canvas_buf, spectrum);

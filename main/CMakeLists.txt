@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "app_main.c"
         "audio_input.c"
+        "board_i2c.c"
         "display.c"
         "modem.c"
         "spectrum.c"

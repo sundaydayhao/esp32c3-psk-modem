@@ -8,8 +8,17 @@
 void spectrum_analyze(const int16_t *samples, size_t count, int sample_rate_hz, spectrum_t *spectrum)
 {
     memset(spectrum, 0, sizeof(*spectrum));
-    if (count == 0) {
+    if (count < 2 || sample_rate_hz <= 0) {
         return;
+    }
+    if (count > SPECTRUM_MAX_SAMPLES) {
+        count = SPECTRUM_MAX_SAMPLES;
+    }
+
+    float windowed[SPECTRUM_MAX_SAMPLES];
+    for (size_t n = 0; n < count; ++n) {
+        const float window = 0.5f - 0.5f * cosf(TWO_PI * (float)n / (float)(count - 1));
+        windowed[n] = ((float)samples[n] / 32768.0f) * window;
     }
 
     float max_mag = 1.0f;
@@ -18,19 +27,21 @@ void spectrum_analyze(const int16_t *samples, size_t count, int sample_rate_hz, 
     for (int bin = 0; bin < SPECTRUM_BINS; ++bin) {
         const float freq = ((float)bin + 0.5f) * ((float)sample_rate_hz / 2.0f) / (float)SPECTRUM_BINS;
         const float w = TWO_PI * freq / (float)sample_rate_hz;
+        const float rot_c = cosf(w);
+        const float rot_s = sinf(w);
         float i_acc = 0.0f;
         float q_acc = 0.0f;
-        float phase = 0.0f;
+        float c = 1.0f;
+        float s = 0.0f;
 
         for (size_t n = 0; n < count; ++n) {
-            const float window = 0.5f - 0.5f * cosf(TWO_PI * (float)n / (float)(count - 1));
-            const float x = ((float)samples[n] / 32768.0f) * window;
-            i_acc += x * cosf(phase);
-            q_acc += x * sinf(phase);
-            phase += w;
-            if (phase >= TWO_PI) {
-                phase -= TWO_PI;
-            }
+            const float x = windowed[n];
+            i_acc += x * c;
+            q_acc += x * s;
+
+            const float next_c = c * rot_c - s * rot_s;
+            s = s * rot_c + c * rot_s;
+            c = next_c;
         }
 
         mags[bin] = sqrtf(i_acc * i_acc + q_acc * q_acc);
@@ -45,5 +56,5 @@ void spectrum_analyze(const int16_t *samples, size_t count, int sample_rate_hz, 
         spectrum->bins[bin] = (uint8_t)lrintf(fminf(255.0f, norm * 255.0f));
     }
 
-    spectrum->peak_hz = (spectrum->peak_bin * sample_rate_hz) / (2 * SPECTRUM_BINS);
+    spectrum->peak_hz = ((2 * spectrum->peak_bin + 1) * sample_rate_hz) / (4 * SPECTRUM_BINS);
 }

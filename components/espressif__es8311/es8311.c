@@ -10,11 +10,13 @@
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_check.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "es8311_reg.h"
 
 typedef struct {
-    i2c_port_t port;
+    i2c_master_dev_handle_t dev_handle;
     uint16_t dev_addr;
 } es8311_dev_t;
 
@@ -146,13 +148,13 @@ static inline esp_err_t es8311_write_reg(es8311_handle_t dev, uint8_t reg_addr, 
 {
     es8311_dev_t *es = (es8311_dev_t *) dev;
     const uint8_t write_buf[2] = {reg_addr, data};
-    return i2c_master_write_to_device(es->port, es->dev_addr, write_buf, sizeof(write_buf), pdMS_TO_TICKS(1000));
+    return i2c_master_transmit(es->dev_handle, write_buf, sizeof(write_buf), 1000);
 }
 
 static inline esp_err_t es8311_read_reg(es8311_handle_t dev, uint8_t reg_addr, uint8_t *reg_value)
 {
     es8311_dev_t *es = (es8311_dev_t *) dev;
-    return i2c_master_write_read_device(es->port, es->dev_addr, &reg_addr, 1, reg_value, 1, pdMS_TO_TICKS(1000));
+    return i2c_master_transmit_receive(es->dev_handle, &reg_addr, 1, reg_value, 1, 1000);
 }
 
 /*
@@ -349,7 +351,13 @@ esp_err_t es8311_init(es8311_handle_t dev, const es8311_clock_config_t *const cl
 
 void es8311_delete(es8311_handle_t dev)
 {
-    free(dev);
+    if (dev) {
+        es8311_dev_t *es = (es8311_dev_t *) dev;
+        if (es->dev_handle) {
+            ESP_ERROR_CHECK(i2c_master_bus_rm_device(es->dev_handle));
+        }
+        free(dev);
+    }
 }
 
 esp_err_t es8311_voice_volume_set(es8311_handle_t dev, int volume, int *volume_set)
@@ -433,10 +441,23 @@ void es8311_register_dump(es8311_handle_t dev)
     }
 }
 
-es8311_handle_t es8311_create(const i2c_port_t port, const uint16_t dev_addr)
+es8311_handle_t es8311_create(i2c_master_bus_handle_t bus, const uint16_t dev_addr)
 {
     es8311_dev_t *sensor = (es8311_dev_t *) calloc(1, sizeof(es8311_dev_t));
-    sensor->port = port;
+    if (!sensor || !bus) {
+        free(sensor);
+        return NULL;
+    }
+
     sensor->dev_addr = dev_addr;
+    const i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = dev_addr,
+        .scl_speed_hz = 400000,
+    };
+    if (i2c_master_bus_add_device(bus, &dev_cfg, &sensor->dev_handle) != ESP_OK) {
+        free(sensor);
+        return NULL;
+    }
     return (es8311_handle_t) sensor;
 }

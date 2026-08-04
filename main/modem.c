@@ -1,10 +1,6 @@
 #include "modem.h"
 
-#include <math.h>
-#include <stdio.h>
 #include <string.h>
-
-#define TWO_PI 6.28318530717958647692f
 
 static const char *const s_mode_names[MODEM_MODE_COUNT] = {
     "BPSK31",
@@ -51,6 +47,7 @@ static void recreate_nue_rx(modem_t *m)
         .userdata = m,
     };
     nuepsk_rx_init(&m->nue_rx, &config);
+    m->nue_rx.sq_thresh = m->config.squelch;
 }
 
 void modem_init(modem_t *m, const modem_config_t *config)
@@ -66,8 +63,6 @@ void modem_set_mode(modem_t *m, modem_mode_t mode)
         return;
     }
     m->config.mode = mode;
-    m->phase = 0.0f;
-    m->bit_clock = 0.0f;
     recreate_nue_rx(m);
 }
 
@@ -112,36 +107,7 @@ size_t modem_process(modem_t *m, const int16_t *samples, size_t count, char *out
         return m->out_len;
     }
 
-    float i_acc = 0.0f;
-    float q_acc = 0.0f;
-    const float phase_inc = TWO_PI * (float)m->config.rx_tone_hz / (float)m->config.sample_rate_hz;
-
-    for (size_t n = 0; n < count; ++n) {
-        const float s = (float)samples[n] / 32768.0f;
-        i_acc += s * cosf(m->phase);
-        q_acc += s * sinf(m->phase);
-        m->phase += phase_inc;
-        if (m->phase >= TWO_PI) {
-            m->phase -= TWO_PI;
-        }
-    }
-
-    const float level = sqrtf(i_acc * i_acc + q_acc * q_acc) / (float)(count ? count : 1);
     m->sample_counter += count;
-
-    /*
-     * NUE-PSK porting note:
-     * components/nuepsk uses NUE's Varicode and RTTY tables today. The next
-     * porting step is replacing this coarse symbol slicer with the FIR,
-     * symbol-sync, AFC, and Viterbi blocks from nuepsk_source/C Source/PskDet.c.
-     */
-    if (level > 0.03f && m->sample_counter / (uint32_t)m->config.sample_rate_hz != m->demo_counter) {
-        m->demo_counter = m->sample_counter / (uint32_t)m->config.sample_rate_hz;
-        return (size_t)snprintf(out, out_size, "[%s %dHz signal %.2f] ",
-                                modem_mode_name(m->config.mode),
-                                m->config.rx_tone_hz,
-                                (double)level);
-    }
 
     out[0] = '\0';
     return 0;

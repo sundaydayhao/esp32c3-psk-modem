@@ -14,7 +14,7 @@
 #include "esp_types.h"
 #include "esp_err.h"
 
-#include "driver/i2c.h"
+#include "driver/i2c_master.h"
 
 /* ES8311 address: CE pin low - 0x18, CE pin high - 0x19 */
 #define ES8311_ADDRRES_0 0x18u // Leaving this here for backward compatibility
@@ -208,14 +208,14 @@ esp_err_t es8311_microphone_fade(es8311_handle_t dev, const es8311_fade_t fade);
 /**
  * @brief Create ES8311 object and return its handle
  *
- * @param[in] port     I2C port number
+ * @param[in] bus      I2C master bus handle
  * @param[in] dev_addr I2C device address of ES8311
  *
  * @return
  *     - NULL Fail
  *     - Others Success
  */
-es8311_handle_t es8311_create(const i2c_port_t port, const uint16_t dev_addr);
+es8311_handle_t es8311_create(i2c_master_bus_handle_t bus, const uint16_t dev_addr);
 
 /**
  * @brief Delete ES8311 object

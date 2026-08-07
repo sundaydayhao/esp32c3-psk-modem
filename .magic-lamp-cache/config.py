@@ -2,7 +2,7 @@
 # Do not edit manually - configure via VSCode workspace settings (magicLamp.codeRoots)
 
 CODE_ROOTS = [
-    "c:\\projects\\esp32-psk-modem",
+    "c:\\projects\\esp32c3-psk-modem",
 ]
 
 EXCLUDE_PATHS = [

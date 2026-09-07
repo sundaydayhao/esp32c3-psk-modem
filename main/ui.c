@@ -4,9 +4,11 @@
 #include "display.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "button_gesture.h"
 
 static const char *TAG = "ui";
-static int s_last_sw1 = 1;
+static button_gesture_t button;
 
 esp_err_t ui_init(void)
 {
@@ -41,11 +43,10 @@ ui_event_t ui_poll(const display_state_t *display_state)
         return event;
     }
 
-    const int sw1 = gpio_get_level(BOARD_SW1_GPIO);
-    if (s_last_sw1 == 1 && sw1 == 0) {
+    if (button_gesture_update(&button, gpio_get_level(BOARD_SW1_GPIO) == 0,
+                              (uint32_t)(esp_timer_get_time() / 1000)) == BUTTON_SHORT) {
         event.type = UI_EVENT_MENU_TOGGLED;
     }
-    s_last_sw1 = sw1;
 
     (void)display_state;
     return event;

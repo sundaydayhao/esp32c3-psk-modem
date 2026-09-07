@@ -1,60 +1,42 @@
 #include "spectrum.h"
-
-#include <math.h>
+#include "bpsk_tables.h"
+#include <stdlib.h>
 #include <string.h>
 
-#define TWO_PI 6.28318530717958647692f
-
-void spectrum_analyze(const int16_t *samples, size_t count, int sample_rate_hz, spectrum_t *spectrum)
+void spectrum_analyze(const int16_t *samples, size_t count, int sample_rate_hz, spectrum_t *out)
 {
-    memset(spectrum, 0, sizeof(*spectrum));
-    if (count < 2 || sample_rate_hz <= 0) {
-        return;
+    memset(out, 0, sizeof(*out));
+    if (!samples || count < 2 || sample_rate_hz <= 0) return;
+    if (count > 256) count = 256;
+    int32_t real[256] = {0}, imag[256] = {0};
+    for (unsigned n = 0; n < count; ++n) {
+        unsigned reverse = 0, value = n;
+        for (unsigned b = 0; b < 8; ++b) { reverse = (reverse << 1) | (value & 1); value >>= 1; }
+        const unsigned phase = n * 1024 / (count - 1);
+        const int32_t window = (32767 - bpsk_sine_q15[(phase + 256) & 1023]) / 2;
+        real[reverse] = ((samples[n] / 4) * window) >> 15;
     }
-    if (count > SPECTRUM_MAX_SAMPLES) {
-        count = SPECTRUM_MAX_SAMPLES;
-    }
-
-    float windowed[SPECTRUM_MAX_SAMPLES];
-    for (size_t n = 0; n < count; ++n) {
-        const float window = 0.5f - 0.5f * cosf(TWO_PI * (float)n / (float)(count - 1));
-        windowed[n] = ((float)samples[n] / 32768.0f) * window;
-    }
-
-    float max_mag = 1.0f;
-    float mags[SPECTRUM_BINS];
-
-    for (int bin = 0; bin < SPECTRUM_BINS; ++bin) {
-        const float freq = ((float)bin + 0.5f) * ((float)sample_rate_hz / 2.0f) / (float)SPECTRUM_BINS;
-        const float w = TWO_PI * freq / (float)sample_rate_hz;
-        const float rot_c = cosf(w);
-        const float rot_s = sinf(w);
-        float i_acc = 0.0f;
-        float q_acc = 0.0f;
-        float c = 1.0f;
-        float s = 0.0f;
-
-        for (size_t n = 0; n < count; ++n) {
-            const float x = windowed[n];
-            i_acc += x * c;
-            q_acc += x * s;
-
-            const float next_c = c * rot_c - s * rot_s;
-            s = s * rot_c + c * rot_s;
-            c = next_c;
-        }
-
-        mags[bin] = sqrtf(i_acc * i_acc + q_acc * q_acc);
-        if (mags[bin] > max_mag) {
-            max_mag = mags[bin];
-            spectrum->peak_bin = bin;
+    for (unsigned width = 2; width <= 256; width *= 2) {
+        for (unsigned base = 0; base < 256; base += width) {
+            for (unsigned j = 0; j < width / 2; ++j) {
+                unsigned phase = j * 1024 / width;
+                int32_t c = bpsk_sine_q15[(phase + 256) & 1023], s = -bpsk_sine_q15[phase];
+                unsigned a = base + j, b = a + width / 2;
+                int32_t tr = (real[b] * c - imag[b] * s) >> 15;
+                int32_t ti = (real[b] * s + imag[b] * c) >> 15;
+                real[b] = (real[a] - tr) / 2; imag[b] = (imag[a] - ti) / 2;
+                real[a] = (real[a] + tr) / 2; imag[a] = (imag[a] + ti) / 2;
+            }
         }
     }
-
-    for (int bin = 0; bin < SPECTRUM_BINS; ++bin) {
-        const float norm = mags[bin] / max_mag;
-        spectrum->bins[bin] = (uint8_t)lrintf(fminf(255.0f, norm * 255.0f));
+    uint32_t magnitudes[64], maximum = 4;
+    for (unsigned b = 0; b < 64; ++b) {
+        /* Combine adjacent FFT bins for the existing 64-column display. */
+        uint32_t a = abs(real[2*b]) + abs(imag[2*b]);
+        uint32_t c = abs(real[2*b+1]) + abs(imag[2*b+1]);
+        magnitudes[b] = a > c ? a : c;
+        if (magnitudes[b] > maximum) { maximum = magnitudes[b]; out->peak_bin = b; }
     }
-
-    spectrum->peak_hz = ((2 * spectrum->peak_bin + 1) * sample_rate_hz) / (4 * SPECTRUM_BINS);
+    for (unsigned b = 0; b < 64; ++b) out->bins[b] = magnitudes[b] * 255 / maximum;
+    out->peak_hz = (2 * out->peak_bin + 1) * sample_rate_hz / 256;
 }

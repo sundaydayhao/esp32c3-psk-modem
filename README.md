@@ -1,73 +1,86 @@
-# ESP32-C3 PSK Modem
+# ESP32-C3 PSK 接收器
 
-ESP-IDF project for the LCKFB SZPI ESP32-C3 board used as an audio-input
-digital-mode receiver. The hardware plan is to remove R27/R28 and R31/R32,
-then inject AM receiver audio into the board ADC path.
+参考 `C:\projects\hpm6750-psk-modem` 的单载波接收流程，面向 ESP32-C3
+重新实现定点 DSP。上电建立 Wi-Fi AP，手机可以实时查看收到的文字。
 
-The firmware is structured around the modes present in `nuepsk_source`:
+## 速率结论
 
-- BPSK31
-- QPSK31 USB
-- QPSK31 LSB / reverse
-- RTTY 45.45 baud, 170 Hz shift
-- PSK63
+- 默认 **BPSK500：500 波特，原始 500 bit/s**，优先用于实际音频链路。
+- 实现上限 **BPSK1000：1000 波特，原始 1000 bit/s**。无附加噪声的主机
+  交叉测试通过；这不是已经测出的 ESP32-C3 板上零误码上限。
+- 同时支持 BPSK31 / 63 / 125 / 250，实际符号率为 31.25 / 62.5 / 125 / 250。
+- Varicode 文本平均净吞吐低于原始比特率；按约 10 bit/字符估计，500 / 1000
+  模式约 50 / 100 字符每秒，具体由文字内容决定，中文每个 UTF-8 字节单独编码。
+- 旧工程 QPSK/RTTY 路径没有完整可用的解码实现，保留原始源码和枚举，但不再
+  放入可选菜单。没有移植 HPM 的多载波、8PSK/FEC、图片协议、语音协议或发送功能。
 
-The old NUE-PSK source is dsPIC-oriented and depends on dsPIC registers,
-memory attributes, and Microchip DSP library types. This project keeps
-NUE-PSK as the single source for mode coverage, RTTY behavior, menus, and
-receiver workflow. No third-party PSK modem library is used.
+详细评估、计算依据、测试边界和上板验收见 [docs/RATE_ASSESSMENT.md](docs/RATE_ASSESSMENT.md)。
 
-## DSP Strategy
+## 手机连接
 
-`components/nuepsk` is the ESP-IDF porting layer for `nuepsk_source`.
-Current modes are the modes defined by the NUE firmware:
+1. 烧录并上电，搜索 **ESP32C3-PSK-xxxx**；后四位取自 AP MAC，方便区别多块板。
+2. 密码：**pskmodem123**。
+3. 选择继续连接此无互联网的 Wi-Fi，浏览器打开 **http://192.168.4.1**。
+4. 发射端与接收端选择相同 BPSK 模式和音频中心频率；默认 **BPSK500 / 1500 Hz**。
+5. 手机页面可改模式/频率、查看接收文字、保存文本及检查 DMA 溢出和处理耗时。
 
-- BPSK31
-- QPSK31 USB
-- QPSK31 LSB / reverse
-- RTTY 45.45 baud, 170 Hz shift
-- PSK63
+不依赖 CDN 或互联网，不要求手机安装应用。此版本使用手动浏览器入口，
+不包含强制门户自动弹窗。AP 最多 4 台手机，频道 6，WPA2-PSK。
+配置当前会话有效，重新上电恢复默认。修改热点参数在 `main/board_config.h`。
 
-The component already uses NUE's Varicode table and RTTY Baudot table. The
-remaining porting work is to move the FIR, AFC, symbol sync, and QPSK Viterbi
-logic out of `nuepsk_source/C Source/PskDet.c` while replacing dsPIC-only
-`fractional`, `FIRDecimate`, `FFTComplexIP`, register, and LCD calls with
-portable ESP32 code.
+板端保留最近 4096 字节，超过后覆盖最旧文字；手机游标落后时会显示丢失提示。
+每台手机独立读取，网页最多保留 32768 个字符。“清空本页”只清空该手机显示，
+保存文本只保存该手机现有内容。没有 CRC 的普通文本不能显示一个可信的实时 BER。
 
-## UI
+## 硬件与任务
 
-- Top half: audio spectrum, centered around the selected receive tone.
-- Bottom half: decoded text stream.
-- SW1: open/close mode menu.
-- Touch in menu: select modulation mode.
-- Touch on spectrum: change receive tone.
+沿用工程已有 LCKFB SZPI ESP32-C3 + ES8311 + ST7789 + FT6336/FT5x06 引脚：
 
-## Hardware Defaults
+- ES8311：I2C SDA GPIO0 / SCL GPIO1；I2S MCLK GPIO10、BCLK GPIO8、WS GPIO12、
+  DOUT GPIO11、DIN GPIO7，16 kHz / 16 bit / stereo。
+- 默认固定取左声道，防止原来按每块幅度切左右声道造成相位跳变。
+  若板上 ES8311 输出在右槽，把 `BOARD_AUDIO_SLOT_LEFT` 改为 0。
+- ES8311 模拟输入增益沿用 24 dB；输入电平过大时先衰减，观察页面削顶计数。
+- LCD：ST7789 240×320，SPI2，SCLK GPIO3、MOSI GPIO5、CS GPIO4、DC GPIO6、背光 GPIO2。
+- 触摸：与 ES8311 共用 I2C；SW1 GPIO9。
+- 无 LCD/触摸的硬件可以把 `BOARD_LOCAL_UI_ENABLED` 改为 0，仍可用手机接收。
 
-Pin assignments are taken from
-`C:\projects\lichuang-esp32c3-demo\08-spi_lcd_touch\spi_lcd_touch` and
-`02-gpio_key`.
+这里的音频来自 **ES8311 ADC 的 I2S 数据**，不是 ESP32-C3 内部 SAR ADC。
+具体模拟输入焊接点、电平和元件改动须以当前板卡原理图为准；固件没有改引脚方案。
 
-Edit `main/board_config.h` if your board revision is different:
+音频任务独占解码状态；控制请求经过队列在块边界应用。采样不受网页发送阻塞。
+8×256 帧 DMA，约 128 ms 缓冲；47 抽头低通将 16 kHz 转成 8 kHz。
+接收器与 FFT 使用整数运算，LCD 频谱更新降为 4 Hz。
+若音频芯片初始化失败，AP 页面仍可显示初始化失败状态。
 
-- `BOARD_AUDIO_ADC_CHANNEL`
-- `BOARD_SW1_GPIO`
-- `BOARD_LCD_*`
-- `BOARD_TOUCH_*`
+## 编译、烧录
 
-Current display/touch defaults:
-
-- LCD: ST7789, 240x320, SPI2, SCLK GPIO3, MOSI GPIO5, CS GPIO4, DC GPIO6,
-  backlight GPIO2.
-- Touch: FT6336/FT5x06, I2C SDA GPIO0, SCL GPIO1.
-- SW1: GPIO9.
-
-## Build
+当前环境：ESP-IDF v6.0.2，ESP RISC-V GCC esp-15.2.0_20251204，CPU 160 MHz，`-O2`。
+使用匹配的编译器，不沿用旧 README 中的 GCC 16 路径。
 
 ```powershell
-C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe -ExecutionPolicy Bypass -NoProfile
-. C:\Espressif\tools\Microsoft.v6.0.2.PowerShell_profile.ps1
-$env:PATH='C:\Espressif\tools\tools\riscv32-esp-elf\esp-16.1.0_20260609\riscv32-esp-elf\bin;' + $env:PATH
-idf.py set-target esp32c3
-idf.py build
+cd C:\projects\esp32c3-psk-modem
+.\tools\build.ps1
+# 连接板子后，把 COMx 替换为实际串口；此命令会编译并烧录。
+.\tools\build.ps1 -Port COMx
 ```
+
+固件应用文件：`build/psk_modem_c3.bin`；标准 IDF 烧录按 `build/flasher_args.json`
+同时写入 bootloader、分区表和应用。应用地址 0x10000，不能把应用 BIN 单独写到 0x0。
+首次构建请保留 `sdkconfig.defaults`，当前使用 8 MB Flash / single-app-large 分区。
+
+本次最终应用大小 1,178,672 字节，完整固件编译、72 个短流与 18 个长流测试通过。
+构建哈希及内存报告在评估文档中。
+
+## 主机验证
+
+```powershell
+.\tools\test_host.ps1
+# Reference 参数可更换参考项目位置；测试使用其真实发送器代码，参考项目仅被读取。
+.\tools\test_host.ps1 -Reference C:\projects\hpm6750-psk-modem
+# 可选：浏览器页面的模拟接口，仅绑定本机。页面明确标注模拟数据。
+python tests\preview_server.py
+```
+
+主机测试不等同于板端 AP 并发压力测试。当前工具调用未检测到串口设备，
+本次没有烧录或取得板上 CPU 占用/物理音频 BER 数据。

@@ -8,6 +8,12 @@ Push-Location $taskRoot
 try {
     New-Item -ItemType Directory -Force build\host | Out-Null
     $env:PATH = (Split-Path -Parent $Compiler) + ';' + $env:PATH
+    & $Compiler -std=c11 -O2 -Wall -Wextra -Werror -ftrapv -I main -I components\nuepsk\include `
+        tests\host_ble.c main\ble_protocol.c main\button_gesture.c main\rx_history.c main\modem.c main\bpsk_rx.c `
+        -lm -o build\host\host_ble.exe
+    if ($LASTEXITCODE -ne 0) { throw 'BLE test compile failed' }
+    & .\build\host\host_ble.exe
+    if ($LASTEXITCODE -ne 0) { throw 'BLE protocol/button tests failed' }
     & $Compiler -std=c11 -O2 -Wall -Wextra -I main -I components\nuepsk\include `
         -I "$Reference\app\modem" -I "$Reference\third_party\psk_rtty\include" `
         tests\host_bpsk.c main\bpsk_rx.c main\audio_decimator.c "$Reference\app\modem\psk_tx.c" `

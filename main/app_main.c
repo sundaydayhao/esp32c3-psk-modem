@@ -5,6 +5,8 @@
 
 #include "audio_input.h"
 #include "board_config.h"
+#include "ble_rx.h"
+#include "output_mode.h"
 #include "display.h"
 #include "esp_check.h"
 #include "esp_log.h"
@@ -32,11 +34,11 @@ static void audio_task(void *arg)
     };
     modem_init(&modem, &config);
     receiver_status_t state = {.mode = config.mode, .tone_hz = config.rx_tone_hz};
-    /* AP remains usable if the codec is missing. Initialize audio in its owner
-     * task, after all potentially slow Wi-Fi/LCD startup operations. */
+    /* Phone diagnostics remain usable if the codec is missing. Initialize audio
+     * after all potentially slow radio/LCD startup operations. */
     esp_err_t result = audio_input_init();
     if (result != ESP_OK) {
-        ESP_LOGE(TAG, "Audio init failed: %s; AP diagnostics remain available", esp_err_to_name(result));
+        ESP_LOGE(TAG, "Audio init failed: %s; phone diagnostics remain available", esp_err_to_name(result));
         receiver_update_status(&state);
         vTaskDelete(NULL);
         return;
@@ -47,7 +49,7 @@ static void audio_task(void *arg)
     int64_t last_status = 0, last_spectrum = 0;
     uint32_t previous_overflows = 0;
     while (true) {
-        /* A bounded, single owner control path. HTTP never edits DSP state. */
+        /* A bounded, single owner control path. Phone tasks never edit DSP state. */
         modem_command_t command;
         if (xQueueReceive(control_queue, &command, 0) == pdTRUE) {
             if (command.mode >= 0) modem_set_mode(&modem, (modem_mode_t)command.mode);
@@ -112,7 +114,13 @@ static void ui_task(void *arg)
 {
     (void)arg;
     display_state_t display_state = {.selected_mode = BOARD_DEFAULT_MODE, .rx_tone_hz = BOARD_DEFAULT_TONE_HZ};
-    display_append_text(&display_state, "Wi-Fi: ESP32C3-PSK-xxxx\nKey: " BOARD_AP_PASSWORD "\nhttp://192.168.4.1\n");
+    if (output_mode_get() == OUTPUT_BLE) {
+        display_append_text(&display_state, ble_rx_name());
+        display_append_text(&display_state, "\nBLE UART: subscribe TX\n");
+    } else {
+        display_append_text(&display_state, "Wi-Fi: ESP32C3-PSK-xxxx\nKey: " BOARD_AP_PASSWORD "\nhttp://192.168.4.1\n");
+    }
+    display_append_text(&display_state, "SW1: hold 2s, release\nto switch Wi-Fi/BLE\n");
     spectrum_t spectrum = {0};
     int64_t last_render = 0;
     while (true) {
@@ -148,7 +156,8 @@ void app_main(void)
     ESP_ERROR_CHECK(control_queue ? ESP_OK : ESP_ERR_NO_MEM);
     const receiver_status_t status = {.mode = BOARD_DEFAULT_MODE, .tone_hz = BOARD_DEFAULT_TONE_HZ};
     receiver_update_status(&status);
-    ESP_ERROR_CHECK(web_rx_start(control_queue));
+    ESP_ERROR_CHECK(output_mode_init());
+    ESP_ERROR_CHECK(output_mode_get() == OUTPUT_BLE ? ble_rx_start(control_queue) : web_rx_start(control_queue));
 #if BOARD_LOCAL_UI_ENABLED
     ESP_ERROR_CHECK(display_init());
     ESP_ERROR_CHECK(ui_init());

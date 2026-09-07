@@ -15,11 +15,12 @@ select,input{width:100%;min-width:0}@media(max-width:560px){form label{flex-basi
 <section><form id="config"><label>调制速率<select id="mode"><option value="0">BPSK31 · 31.25 波特</option><option value="4">BPSK63 · 62.5 波特</option><option value="5">BPSK125 · 125 波特</option><option value="6">BPSK250 · 250 波特</option><option value="7" selected>BPSK500 · 500 波特</option><option value="8">BPSK1000 · 1000 波特</option></select></label><label>音频中心频率 / Hz<input id="tone" type="number" min="600" max="3400" step="1" value="1500" required></label><button class="primary" id="apply">应用</button></form><div class="muted" id="message" role="status">发射端与接收端须使用相同模式和音频频率。</div></section>
 <section><div class="row"><h2>接收内容</h2><div><button type="button" id="download">保存文本</button> <button type="button" id="clear">清空本页</button></div></div><pre id="text" aria-label="接收文字"></pre><div class="muted" id="history">保留板端最近 4 KB；本页最多显示 32768 个字符。</div></section>
 <section><h2>接收状态</h2><div id="metrics" class="muted">等待板端状态…</div><p class="muted">连接此热点后没有互联网。若手机提示，请选择继续使用此 Wi-Fi。访问地址：<a href="http://192.168.4.1">192.168.4.1</a>。</p><p class="muted">处理耗时与丢块统计用于检查运行状态；普通 PSK 文本没有 CRC，不能据此判定无线链路零误码。</p></section>
+<section><h2>蓝牙接收</h2><p class="muted">切换后板子会重启并关闭此热点。用手机 BLE UART 应用连接 ESP32C3-PSK-BLE-xxxx，订阅 TX 通知即可接收文字。板子运行后长按 SW1 两秒再松开可切回 Wi-Fi；选择会保存。</p><button type="button" id="ble">切换到蓝牙（重启）</button><p class="muted" id="output-message" role="status"></p></section>
 <script>
 'use strict';
 const $=id=>document.getElementById(id);
 let cursor='0',session=null,decoder=new TextDecoder('utf-8'),dirty=false,pending=null,ticks=0;
-let lastStatus=null;
+let lastStatus=null,switching=false;
 function limits(){const b={0:31,4:62,5:125,6:250,7:500,8:1000}[$('mode').value];$('tone').min=b+100;$('tone').max=Math.min(3500,3900-b)}
 $('mode').addEventListener('change',()=>{dirty=true;limits()});$('tone').addEventListener('input',()=>dirty=true);
 function append(value){const box=$('text'),atEnd=box.scrollHeight-box.scrollTop-box.clientHeight<50;box.textContent=(box.textContent+value).slice(-32768);if(atEnd)box.scrollTop=box.scrollHeight}
@@ -27,8 +28,11 @@ async function fetchTimed(url,options={},read=r=>r.json()){const controller=new 
 $('config').addEventListener('submit',async event=>{event.preventDefault();$('apply').disabled=true;try{const want={mode:Number($('mode').value),tone:Number($('tone').value),revision:lastStatus?.control_revision??-1};const accepted=await fetchTimed('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-PSK-Client':'receiver'},body:new URLSearchParams({mode:want.mode,tone:want.tone})});want.revision=accepted.revision??want.revision;pending=want;dirty=false;$('message').textContent='配置已排队，等待接收器应用…'}catch(e){$('message').textContent='设置失败：'+e.message;$('apply').disabled=false}});
 $('clear').onclick=()=>{$('text').textContent=''};
 $('download').onclick=()=>{const url=URL.createObjectURL(new Blob([$ ('text').textContent],{type:'text/plain;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download='psk-received.txt';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
-async function poll(){try{
+function switchingMessage(){$('output-message').textContent='已请求切换到 BLE，热点即将断开。若未切换，可在板子运行后长按 SW1 两秒并松开。';$('connection').textContent='正在切换到蓝牙';$('connection').className='badge';$('apply').disabled=true}
+$('ble').onclick=async()=>{$('ble').disabled=true;try{await fetchTimed('/api/output',{method:'POST',headers:{'Content-Type':'text/plain','X-PSK-Client':'receiver'},body:'ble'});switching=true;switchingMessage()}catch(e){$('ble').disabled=false;$('output-message').textContent='未收到切换确认：'+e.message+'。若热点已消失，请扫描 BLE 设备。'}};
+async function poll(){if(switching)return;try{
  const response=await fetchTimed('/api/rx?since='+encodeURIComponent(cursor),{},async r=>({session:r.headers.get('X-RX-Session'),next:r.headers.get('X-RX-Next'),dropped:r.headers.get('X-RX-Dropped'),data:await r.arrayBuffer()}));
+ if(switching)return;
  const current=response.session;
  if(session!==null&&session!==current){cursor='0';decoder=new TextDecoder('utf-8');session=current;pending=null;$('apply').disabled=false;append('\n[接收板已重启]\n');return}
  session=current;
@@ -36,13 +40,13 @@ async function poll(){try{
  if(dropped){decoder=new TextDecoder('utf-8');append('\n[历史缓冲覆盖了 '+dropped+' 字节，请及时保存]\n')}
  append(decoder.decode(response.data,{stream:true}));cursor=response.next||cursor;
  $('connection').textContent='已连接';$('connection').className='badge good';
- if(ticks++%2===0){const s=await fetchTimed('/api/status');lastStatus=s;$('ap').textContent=s.ssid+' · '+s.name+' / '+s.tone_hz+' Hz';
+ if(ticks++%2===0){const s=await fetchTimed('/api/status');if(switching)return;lastStatus=s;$('ap').textContent=s.ssid+' · '+s.name+' / '+s.tone_hz+' Hz';
   if(!dirty&&!pending){$('mode').value=s.mode;$('tone').value=s.tone_hz;limits()}
   if(pending&&s.control_revision>pending.revision){$('message').textContent=s.mode===pending.mode&&s.tone_hz===pending.tone?'已应用；正在重新捕获信号。':'设置已更新，另一客户端或板上按键也修改了配置。';pending=null;$('apply').disabled=false}
   const rows=[['音频',s.audio_ready?(s.signal?'正在解调':'等待信号'):'初始化失败，请检查接线'],['相位质量',s.quality+' / 100'],['音频 RMS',s.rms],['最近处理',s.dsp_us+' µs / 32000 µs'],['最大处理',s.max_dsp_us+' µs'],['超时块',s.deadline_misses],['DMA 溢出',s.dma_overflows],['读取异常',s.read_errors],['削顶采样',s.clipped_samples],['文字丢失',s.output_drops],['无效码字',s.invalid_codes],['空闲内存',Math.round(s.free_heap/1024)+' KB'],['已处理采样',s.samples],['在线手机',s.clients]];
   $('metrics').replaceChildren(...rows.map(([k,v])=>{const el=document.createElement('div');el.textContent=k+'：'+v;return el}));
  }
-}catch(e){$('connection').textContent='连接中断，正在重试';$('connection').className='badge warn';if(pending){pending=null;$('apply').disabled=false;$('message').textContent='连接中断；请检查当前配置后再试。'}}finally{setTimeout(poll,500)}}
+}catch(e){if(!switching){$('connection').textContent='连接中断，正在重试';$('connection').className='badge warn';if(pending){pending=null;$('apply').disabled=false;$('message').textContent='连接中断；请检查当前配置后再试。'}}}finally{if(!switching)setTimeout(poll,500)}}
 limits();poll();
 </script>
 </html>

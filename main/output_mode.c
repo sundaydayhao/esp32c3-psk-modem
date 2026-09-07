@@ -55,6 +55,9 @@ static void mode_task(void *arg)
                 esp_err_t rc = save(next);
                 if (rc == ESP_OK) {
                     ESP_LOGI(TAG, "Switching to %s; rebooting", next == OUTPUT_BLE ? "BLE" : "Wi-Fi AP");
+                    /* GPIO9 is also BOOT: a new press during NVS commit must
+                     * be released before the reset. */
+                    while (gpio_get_level(BOARD_SW1_GPIO) == 0) vTaskDelay(pdMS_TO_TICKS(20));
                     esp_restart();
                 }
                 ESP_LOGE(TAG, "Cannot save output mode: %s", esp_err_to_name(rc));

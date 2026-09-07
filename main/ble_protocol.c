@@ -1,5 +1,4 @@
 #include "ble_protocol.h"
-#include <stdio.h>
 #include <string.h>
 
 size_t ble_payload_limit(unsigned mtu)
@@ -27,9 +26,19 @@ ble_command_t ble_command_parse(const char *line)
     if (!line) return result;
     if (strcmp(line, "WIFI") == 0) { result.type = BLE_COMMAND_WIFI; return result; }
     if (strcmp(line, "REPLAY") == 0) { result.type = BLE_COMMAND_REPLAY; return result; }
-    char name[16], extra;
-    unsigned tone;
-    if (strncmp(line, "SET ", 4) != 0 || sscanf(line + 4, "%15s %u %c", name, &tone, &extra) != 2) return result;
+    char name[16];
+    if (strncmp(line, "SET ", 4) != 0) return result;
+    const char *space = strchr(line + 4, ' ');
+    if (!space || space == line + 4 || (size_t)(space - line - 4) >= sizeof(name)) return result;
+    size_t length = (size_t)(space - line - 4);
+    memcpy(name, line + 4, length);
+    name[length] = 0;
+    unsigned tone = 0;
+    if (!space[1]) return result;
+    for (const char *p = space + 1; *p; ++p) {
+        if (*p < '0' || *p > '9' || tone > 350) return result;
+        tone = tone * 10 + (unsigned)(*p - '0');
+    }
     for (unsigned mode = 0; mode < MODEM_MODE_COUNT; ++mode) {
         if (!modem_mode_supported((modem_mode_t)mode) || strcmp(name, modem_mode_name((modem_mode_t)mode))) continue;
         unsigned margin = 8000 / modem_samples_per_symbol((modem_mode_t)mode) + 100;

@@ -103,13 +103,39 @@ static esp_err_t rx_get(httpd_req_t *req)
     httpd_resp_set_hdr(req, "X-RX-Session", session_text);
     return httpd_resp_send(req, (const char *)bytes, length);
 }
-static esp_err_t config_post(httpd_req_t *req)
+static bool receiver_client(httpd_req_t *req)
 {
     /* A custom header prevents a different website from changing the radio
      * with a cross-origin form. This AP does not enable CORS. */
     char client[16];
-    if (httpd_req_get_hdr_value_str(req, "X-PSK-Client", client, sizeof(client)) != ESP_OK ||
-        strcmp(client, "receiver") != 0) {
+    return httpd_req_get_hdr_value_str(req, "X-PSK-Client", client, sizeof(client)) == ESP_OK &&
+           strcmp(client, "receiver") == 0;
+}
+static esp_err_t output_post(httpd_req_t *req)
+{
+    if (!receiver_client(req)) {
+        return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "Receiver page required");
+    }
+    if (req->content_len != 3) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Expected ble");
+    char body[3];
+    size_t received = 0;
+    while (received < sizeof(body)) {
+        int n = httpd_req_recv(req, body + received, sizeof(body) - received);
+        if (n <= 0) return ESP_FAIL;
+        received += (size_t)n;
+    }
+    if (memcmp(body, "ble", sizeof(body))) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Expected ble");
+    if (output_mode_request(OUTPUT_BLE) != ESP_OK) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        return httpd_resp_sendstr(req, "Switch pending; retry");
+    }
+    response_headers(req, "application/json");
+    httpd_resp_set_status(req, "202 Accepted");
+    return httpd_resp_sendstr(req, "{\"rebooting\":true}");
+}
+static esp_err_t config_post(httpd_req_t *req)
+{
+    if (!receiver_client(req)) {
         return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "Receiver page required");
     }
     char body[64], mode_text[16], tone_text[16];
@@ -194,6 +220,7 @@ esp_err_t web_rx_start(QueueHandle_t controls)
         {.uri = "/api/status", .method = HTTP_GET, .handler = status_get},
         {.uri = "/api/rx", .method = HTTP_GET, .handler = rx_get},
         {.uri = "/api/config", .method = HTTP_POST, .handler = config_post},
+        {.uri = "/api/output", .method = HTTP_POST, .handler = output_post},
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
         ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &routes[i]), TAG, "HTTP route");

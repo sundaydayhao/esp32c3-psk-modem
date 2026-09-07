@@ -41,8 +41,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()
-        if self.path != "/api/config": return self.send(b"{}", status=404)
         if self.headers.get("X-PSK-Client") != "receiver": return self.send(b"{}", status=403)
+        if self.path == "/api/output":
+            return self.send(b'{"rebooting":true}', status=202 if body == "ble" else 400)
+        if self.path != "/api/config": return self.send(b"{}", status=404)
         params = parse_qs(body)
         previous_revision = state["control_revision"]
         state["mode"] = int(params["mode"][0])
